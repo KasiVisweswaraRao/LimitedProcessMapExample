@@ -1,86 +1,102 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
-public class Program
+class Program
 {
     static async Task Main(string[] args)
     {
-        // Sample lambda functions doing some random work
-        List<Func<Task<int>>> functions = new List<Func<Task<int>>>
-        {
-            async () => { await Task.Delay(500); return 1; },
-            async () => { await Task.Delay(1000); return 2; },
-            async () => { await Task.Delay(1500); return 3; },
-            async () => { await Task.Delay(200); return 4; },
-            async () => { await Task.Delay(300); return 5; },
-             async () => { await Task.Delay(2000); return 6; },
-              async () => { await Task.Delay(2500); return 7; },
+        // Example usage
+        int N = 3;
+        int timeoutMs = 5000;
 
+        List<Func<Task<object>>> functions = new List<Func<Task<object>>>
+        {
+             async () => { await Task.Delay(1000); throw new Exception("Function 1 failed"); }, // throw error
+            async () => { await Task.Delay(8000); return "Result 2"; }, // should be time out
+            async () => { await Task.Delay(7000); return "Result 3"; }, // should be time out
+            async () => { await Task.Delay(2000); return "Result 4"; }, // success result should be 3
+            async () => { await Task.Delay(4000); return "Result 5"; }, // success result should be 4
+            async () => { await Task.Delay(6000); return "Result 6"; }, // should be time out 
+           
         };
 
         try
         {
-            var results = await PMapN(10, functions, 3000);
-            Console.WriteLine("Results: " + string.Join(", ", results));
+            var results = await PMapN(N, functions, timeoutMs);
+            Console.WriteLine("Results:");
+            foreach (var result in results)
+            {
+                Console.WriteLine(result);
+            }
         }
         catch (TimeoutException)
         {
-            Console.WriteLine("Execution timed out.");
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine("Exception: " + ex.Message);
+            Console.WriteLine("The operation timed out.");
         }
     }
 
-    public static async Task<List<TResult>> PMapN<TResult>(int maxConcurrency, List<Func<Task<TResult>>> functions, int timeoutMs)
+    public static async Task<List<object>> PMapN(int N, List<Func<Task<object>>> functions, int timeoutMs)
     {
-        if (functions == null || functions.Count == 0)
-            throw new ArgumentException("The functions list cannot be null or empty.");
 
-        //it will be forced to run maxConcurrency  active thread at time.
-        using var semaphore = new SemaphoreSlim(maxConcurrency);
 
-        // Create the token source.
         using var cts = new CancellationTokenSource();
+      
+      
+        var results = new object[functions.Count];
+        var tasks = new List<Task>();
 
-        var timeoutTask = Task.Delay(timeoutMs, cts.Token);
-        var tasks = new List<Task<TResult>>();
-
-        foreach (var function in functions)
+        using (var semaphore = new SemaphoreSlim(N))
         {
-            await semaphore.WaitAsync(cts.Token);
-
-            tasks.Add(Task.Run(async () =>
+            for (int i = 0; i < functions.Count; i++)
             {
-                try
+                int index = i;
+
+              
+                await semaphore.WaitAsync(cts.Token);
+
+                tasks.Add(Task.Run(async () =>
                 {
-                    var result = await function();
-                    return result;
-                }
-                catch
-                {
-                    throw;
-                }
-                finally
-                {
-                    semaphore.Release();
-                }
-            }, cts.Token));
+                    try
+                    {
+                        using var taskCts = new CancellationTokenSource(timeoutMs);
+                        var functionTask = functions[index]();
+                        if (await Task.WhenAny(functionTask, Task.Delay(timeoutMs, taskCts.Token)) == functionTask)
+                        {
+                            results[index] = await functionTask;
+                        }
+                        else
+                        {
+                            results[index] = "Task timed out";
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                       
+                        results[index] = ex.Message;
+                       
+                    }
+                    finally
+                    {
+                        semaphore.Release();
+                       
+                    }
+                }, cts.Token));
+            }
+
+            try
+            {
+                await Task.WhenAll(tasks);
+                
+            }
+            catch (OperationCanceledException)
+            {
+                throw new TimeoutException("The operation timed out.");
+            }
         }
 
-        var allTasks = Task.WhenAll(tasks);
-        var completedTask = await Task.WhenAny(allTasks, timeoutTask);
-
-        if (completedTask == timeoutTask)
-        {
-            cts.Cancel();
-            throw new TimeoutException("The operation has timed out.");
-        }
-
-        return (await allTasks).ToList();
+        return results.ToList();
     }
 }
